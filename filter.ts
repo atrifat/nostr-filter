@@ -41,10 +41,9 @@ if (NODE_ENV === "production") {
 
   };
   console.debug = (...data) => {
-
+  
   };
 }
-
 const listenPort: number = parseInt(process.env.LISTEN_PORT ?? "8081"); // クライアントからのWebSocket待ち受けポート
 const upstreamHttpUrl: string =
   process.env.UPSTREAM_HTTP_URL ?? "http://localhost:8080"; // 上流のWebSocketサーバのURL
