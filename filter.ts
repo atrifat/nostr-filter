@@ -1102,6 +1102,7 @@ async function listen(): Promise<void> {
               case "partialsfw":
                 if (!shouldRelay) break;
                 // Accept as long as it is not nsfw or it has content warning or it has nsfw hashtag
+                shouldRelay = false;
                 if (contentWarningExist || nsfwHashtagExist) {
                   shouldRelay = true;
                 }
