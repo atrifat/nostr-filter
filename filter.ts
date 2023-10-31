@@ -8,6 +8,30 @@ import { Mutex } from "async-mutex";
 import { v4 as uuidv4 } from "uuid";
 import * as mime from "mime-types";
 import dotenv from "dotenv";
+import "websocket-polyfill";
+import {
+  generatePrivateKey,
+  getEventHash,
+  getPublicKey,
+  getSignature,
+  nip44,
+  SimplePool,
+  SubscriptionOptions,
+  validateEvent,
+  verifySignature,
+} from "nostr-tools";
+import { eventKind, NostrEventExt, NostrFetcher } from "nostr-fetch";
+import { simplePoolAdapter } from "@nostr-fetch/adapter-nostr-tools";
+import pLimit from "p-limit";
+import { LRUCache } from "lru-cache";
+import { exit } from "process";
+import { setInterval } from "timers";
+import {
+  extractHashtags,
+  hasContentWarning,
+  hasNsfwHashtag,
+  isActivityPubUser,
+} from "./nostr-util";
 
 dotenv.config();
 const NODE_ENV = process.env.NODE_ENV || "production";
@@ -17,14 +41,42 @@ if (NODE_ENV === "production") {
 
   };
   console.debug = (...data) => {
-  
+
   };
 }
 const listenPort: number = parseInt(process.env.LISTEN_PORT ?? "8081"); // クライアントからのWebSocket待ち受けポート
-const upstreamHttpUrl: string = process.env.UPSTREAM_HTTP_URL ??
-  "http://localhost:8080"; // 上流のWebSocketサーバのURL
-const upstreamWsUrl: string = process.env.UPSTREAM_WS_URL ??
-  "ws://localhost:8080"; // 上流のWebSocketサーバのURL
+const upstreamHttpUrl: string =
+  process.env.UPSTREAM_HTTP_URL ?? "http://localhost:8080"; // 上流のWebSocketサーバのURL
+const upstreamWsUrl: string =
+  process.env.UPSTREAM_WS_URL ?? "ws://localhost:8080"; // 上流のWebSocketサーバのURL
+const NOSTR_MONITORING_BOT_PUBLIC_KEY: string =
+  process.env.NOSTR_MONITORING_BOT_PUBLIC_KEY ?? "";
+const CLASSIFICATION_EVENT_KIND = 9978;
+const NSFW_CLASSIFICATION_D_TAG = "nostr-nsfw-classification";
+const LANGUAGE_CLASSIFICATION_D_TAG = "nostr-language-classification";
+
+const pool = new SimplePool();
+const fetcherNonPool = NostrFetcher.init();
+const fetcher = NostrFetcher.withCustomPool(simplePoolAdapter(pool));
+const relayRequestLimiter = pLimit(10);
+const nHoursAgoInUnixTime = (hrs: number): number =>
+  Math.floor((Date.now() - hrs * 60 * 60 * 1000) / 1000);
+
+const nsfwClassificationCache = new LRUCache(
+  {
+    max: 200000,
+    // how long to live in ms (3 days)
+    ttl: 3 * 24 * 60 * 60 * 1000,
+  },
+);
+
+const languageClassificationCache = new LRUCache(
+  {
+    max: 500000,
+    // how long to live in ms (3 days)
+    ttl: 3 * 24 * 60 * 60 * 1000,
+  },
+);
 
 // 書き込み用の上流リレーとの接続(あらかじめ接続しておいて、WS接続直後のイベントでも取りこぼしを防ぐため)
 let upstreamWriteSocket = new WebSocket(upstreamWsUrl);
@@ -63,13 +115,14 @@ const contentFilters: RegExp[] = [
 
 // ブロックするユーザーの公開鍵の配列
 const blockedPubkeys: string[] =
-  (typeof process.env.BLOCKED_PUBKEYS !== "undefined"  && process.env.BLOCKED_PUBKEYS !== "")
+  (typeof process.env.BLOCKED_PUBKEYS !== "undefined" &&
+    process.env.BLOCKED_PUBKEYS !== "")
     ? process.env.BLOCKED_PUBKEYS.split(",").map((pubkey) => pubkey.trim())
     : [];
 // Allow only whitelisted pubkey to write events
 const whitelistedPubkeys: string[] =
   (typeof process.env.WHITELISTED_PUBKEYS !== "undefined" &&
-      process.env.WHITELISTED_PUBKEYS !== "")
+    process.env.WHITELISTED_PUBKEYS !== "")
     ? process.env.WHITELISTED_PUBKEYS.split(",").map((pubkey) => pubkey.trim())
     : [];
 // Filter proxy events
@@ -108,10 +161,9 @@ function ipMatchesCidr(ip: string, cidr: string): boolean {
     const ipNum = BigInt(`0x${ip.replace(/:/g, "")}`);
     const rangeNum = BigInt(`0x${range.replace(/:/g, "")}`);
     const mask6 = BigInt(
-      `0x${"f".repeat(32 - parseInt(bits, 10))}${
-        "0".repeat(
-          parseInt(bits, 10),
-        )
+      `0x${"f".repeat(32 - parseInt(bits, 10))}${"0".repeat(
+        parseInt(bits, 10),
+      )
       }`,
     );
 
@@ -151,7 +203,220 @@ setInterval(() => {
   loggingMemoryUsage();
 }, 1 * 60 * 1000); // ヒープ状態を1分ごとに実行
 
-function listen(): void {
+let relayPool;
+
+async function regularEventFetcherWarmup() {
+  let subRegularEventFetcher = pool.sub(
+    [upstreamWsUrl],
+    [
+      {
+        kinds: [eventKind.text],
+        limit: 500,
+      },
+    ],
+    {
+      id: "regularEventFetcher-1",
+    },
+  );
+
+  subRegularEventFetcher.on("eose", () => {
+    subRegularEventFetcher.unsub();
+    // subNsfwClassificationDataEose = true;
+  });
+  subRegularEventFetcher.on("event", (event) => {
+    // Only process after eose event
+    // return
+  });
+}
+
+const classificationDataFetcher = async (kind: number, monitoringBotPubkey: string, dtag: string, sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0): Promise<NostrEventExt[]> => {
+  return new Promise<NostrEventExt[]>(async (resolve, reject) => {
+    const stride = sinceHoursAgoToCheck > 24 ? 2 : 1;
+    const promiseList = [];
+    for (let i = 0; i + untilHoursAgoToCheck < sinceHoursAgoToCheck; i += stride) {
+      const since = (i + stride + untilHoursAgoToCheck) > sinceHoursAgoToCheck ? sinceHoursAgoToCheck : (i + stride + untilHoursAgoToCheck);
+      const until = i + untilHoursAgoToCheck;
+      console.debug("Fetching", dtag, "since", since, "hours ago", "until", until, "hours ago");
+      promiseList.push(relayRequestLimiter(() => {
+        return fetcherNonPool.fetchAllEvents(
+          [upstreamWsUrl],
+          /* filter */
+          {
+            kinds: [kind],
+            "authors": [monitoringBotPubkey],
+            "#d": [dtag],
+            // "#e": subEventsId,
+          },
+          /* time range filter */
+          {
+            since: nHoursAgoInUnixTime(since),
+            until: nHoursAgoInUnixTime(until),
+          },
+          /* fetch options (optional) */
+          { sort: false, skipVerification: true },
+        );
+      }));
+    }
+    const joinResultRaw = await Promise.allSettled(promiseList);
+    const joinResult: NostrEventExt[] = [];
+
+    for (const tmpResult of joinResultRaw) {
+      if (tmpResult.status === 'rejected') {
+        console.error(tmpResult.reason.message);
+        continue;
+      }
+      tmpResult.value.forEach(item => {
+        joinResult.push(item);
+      });
+    }
+
+    resolve(joinResult);
+  });
+};
+
+const allClassificationDataFetcher = async (sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0): Promise<NostrEventExt[]> => {
+  return new Promise(async (resolve, reject) => {
+    const joinResult: NostrEventExt[] = [];
+
+    const promiseList = []
+    promiseList.push(classificationDataFetcher(
+      CLASSIFICATION_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, NSFW_CLASSIFICATION_D_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
+    promiseList.push(classificationDataFetcher(
+      CLASSIFICATION_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, LANGUAGE_CLASSIFICATION_D_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
+
+    const joinResultRaw = await Promise.allSettled(promiseList);
+
+    for (const tmpResult of joinResultRaw) {
+      if (tmpResult.status === 'rejected') continue;
+      tmpResult.value.forEach(item => {
+        joinResult.push(item);
+      });
+    }
+
+    resolve(joinResult);
+  });
+};
+
+async function fetchClassificationDataHistory(
+  sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0
+) {
+  const classificationData = await allClassificationDataFetcher(sinceHoursAgoToCheck, untilHoursAgoToCheck);
+
+  for (const classification of classificationData) {
+    const eventTags = classification.tags.filter((tag) => tag[0] === "e");
+    const dTags = classification.tags.filter((tag) => tag[0] === "d");
+    if (eventTags.length === 0) continue;
+    if (dTags.length === 0) continue;
+    const eventId = eventTags[0][1];
+    const dTag = dTags[0][1];
+
+    switch (dTag) {
+      case NSFW_CLASSIFICATION_D_TAG:
+        if (nsfwClassificationCache.has(eventId)) break;
+        nsfwClassificationCache.set(eventId, JSON.parse(classification.content));
+        break;
+      case LANGUAGE_CLASSIFICATION_D_TAG:
+        if (languageClassificationCache.has(eventId)) break;
+        languageClassificationCache.set(eventId, JSON.parse(classification.content));
+        break;
+      default:
+        break;
+    }
+  }
+
+  console.debug(classificationData[0]);
+  console.debug(classificationData[classificationData.length - 1]);
+  console.info("classificationData.length", classificationData.length);
+}
+
+async function subscribeClassificationDataHistory() {
+  let subClassificationData = pool.sub(
+    [upstreamWsUrl],
+    [
+      {
+        kinds: [CLASSIFICATION_EVENT_KIND],
+        "authors": [NOSTR_MONITORING_BOT_PUBLIC_KEY],
+        "#d": [NSFW_CLASSIFICATION_D_TAG, LANGUAGE_CLASSIFICATION_D_TAG],
+      },
+    ],
+    {
+      id: "subClassification",
+    },
+  );
+  let subClassificationDataEose = false;
+
+  subClassificationData.on("eose", () => {
+    // sub.unsub()
+    subClassificationDataEose = true;
+  });
+  subClassificationData.on("event", (event) => {
+    // Only process after eose event
+    // if (!subClassificationDataEose) return;
+    const eventTags = event.tags.filter((tag) => tag[0] === "e");
+    const dTags = event.tags.filter((tag) => tag[0] === "d");
+    if (eventTags.length === 0) return;
+    if (dTags.length === 0) return;
+    const eventId = eventTags[0][1];
+    const dTag = dTags[0][1];
+
+    try {
+      const classificationData = JSON.parse(event.content);
+      switch (dTag) {
+        case NSFW_CLASSIFICATION_D_TAG:
+          if (nsfwClassificationCache.has(eventId)) break;
+          nsfwClassificationCache.set(eventId, classificationData);
+          break;
+        case LANGUAGE_CLASSIFICATION_D_TAG:
+          if (languageClassificationCache.has(eventId)) break;
+          languageClassificationCache.set(eventId, classificationData);
+          break;
+        default:
+          break;
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  });
+}
+
+async function listen(): Promise<void> {
+  subscribeClassificationDataHistory();
+
+  const sinceHoursAgoToCheck = 24 * 1;
+  const untilHoursAgoToCheck = 4;
+  const fetchStartTime = performance.now();
+  // Fetch short time range data as initial data (fast response)
+  await fetchClassificationDataHistory(untilHoursAgoToCheck, 0);
+  console.info("ClassificationCache after initial data");
+  console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
+  console.info("languageClassificationCache.size", languageClassificationCache.size);
+  console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size);
+
+  // Fetch longer time range data in the background (maximum for 3 days)
+  (async () => {
+    await fetchClassificationDataHistory(sinceHoursAgoToCheck, untilHoursAgoToCheck);
+    console.info("ClassificationCache after fetching", sinceHoursAgoToCheck, untilHoursAgoToCheck);
+    console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
+    console.info("languageClassificationCache.size", languageClassificationCache.size);
+    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size);
+    await fetchClassificationDataHistory(sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck);
+    console.info("ClassificationCache after fetching", sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck);
+    console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
+    console.info("languageClassificationCache.size", languageClassificationCache.size);
+    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size);
+    await fetchClassificationDataHistory(sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2);
+    console.info("ClassificationCache after fetching", sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2);
+    console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
+    console.info("languageClassificationCache.size", languageClassificationCache.size);
+    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size);
+  })();
+
+  const fetchEndTime = performance.now();
+  console.info("fetchClassificationDataHistory elapsed time: ", fetchEndTime - fetchStartTime);
+
+  // Regular event fetcher warmup
+  setInterval(() => regularEventFetcherWarmup, 60 * 1000);
+
   console.info(JSON.stringify({ msg: "Started", listenPort }));
 
   // HTTPサーバーの構成
@@ -237,6 +502,9 @@ function listen(): void {
 
       // 接続が確立されるたびにカウントを増やす
       connectionCount++;
+
+      const reqUrl = new URL(req.url ?? "/", `http://${req.headers["host"]}`);
+      const searchParams = reqUrl.searchParams;
 
       // 接続元のクライアントIPを取得
       const ip =
@@ -460,8 +728,8 @@ function listen(): void {
             }),
           );
 
-          if (event[2].limit && event[2].limit > 500) {
-            event[2].limit = 500;
+          if (event[2].limit && event[2].limit > 2000) {
+            event[2].limit = 2000;
             isMessageEdited = true;
           }
         } else if (event[0] === "CLOSE") {
@@ -498,7 +766,7 @@ function listen(): void {
               message: event,
             }),
           );
-          
+
           if (event[0] === "INVALID") {
             shouldRelay = false;
             because = event[1];
@@ -741,6 +1009,218 @@ function listen(): void {
                 because = "Blocked event by pubkey";
                 break;
               }
+            }
+
+            const eventId = event[2].id;
+
+            // My Classification Filter
+            let cachedNsfwClassification;
+            if (nsfwClassificationCache.has(eventId)) {
+              cachedNsfwClassification = nsfwClassificationCache.get(eventId);
+            } else {
+              // Fetch classification data
+              // const classificationRawData = await fetcher.fetchLastEvent(
+              //   [upstreamWsUrl],
+              //   /* filter */
+              //   {
+              //     kinds: [CLASSIFICATION_EVENT_KIND],
+              //     "authors": [NOSTR_MONITORING_BOT_PUBLIC_KEY],
+              //     "#e": [eventId],
+              //     "#d": ["nostr-nsfw-classification"],
+              //   },
+              // );
+
+              // if (classificationRawData) {
+              //   cachedNsfwClassification = JSON.parse(
+              //     classificationRawData.content,
+              //   );
+              //   nsfwClassificationCache.set(eventId, cachedNsfwClassification);
+              // }
+            }
+
+            let isNsfw = false;
+
+            // Filter content (NSFW/SFW) configurations
+            let filterContentMode = searchParams.get("content") ?? "sfw";
+            let validFilterContentMode = ["all", "sfw", "partialsfw", "nsfw"];
+            let nsfwConfidenceThresold = parseInt(
+              searchParams.get("nsfw_confidence") ?? "75",
+            );
+            nsfwConfidenceThresold = Number.isNaN(nsfwConfidenceThresold) ||
+              nsfwConfidenceThresold < 0 || nsfwConfidenceThresold > 100
+              ? 75 / 100
+              : nsfwConfidenceThresold / 100;
+
+            // Filter language configurations
+            let filterLanguageModeString = searchParams.get("lang") ?? "all";
+            let filterLanguageMode = filterLanguageModeString.split(",").map(lang => lang.trim());
+            let languageConfidenceThresold = parseInt(
+              searchParams.get("lang_confidence") ?? "15",
+            );
+            languageConfidenceThresold = Number.isNaN(languageConfidenceThresold) ||
+              languageConfidenceThresold < 0 || languageConfidenceThresold > 100
+              ? 15
+              : languageConfidenceThresold;
+            let filterUserMode = searchParams.get("user") ?? "all";
+            let validFilterUserMode = ["all", "nostr", "activitypub"];
+            const contentWarningExist = hasContentWarning(event[2].tags ?? []);
+            const nsfwHashtagExist = hasNsfwHashtag(
+              extractHashtags(event[2].tags ?? []),
+            );
+
+            // Check classification results
+            if (cachedNsfwClassification) {
+              const nsfwRulesFilter = function (
+                classifications: any,
+                nsfwConfidenceThresold: number = 0.75,
+              ): boolean {
+                // Doesn't have classifications data since it doesn't have image url
+                if (!classifications) return false;
+
+                // Check if any image url classification is nsfw
+                let result = false;
+                for (const classification of classifications) {
+                  const nsfw_probabilty = 1 -
+                    parseFloat(classification.data.neutral);
+                  if (nsfw_probabilty >= nsfwConfidenceThresold) {
+                    result = true;
+                    break;
+                  }
+                }
+                return result;
+              };
+
+              isNsfw = nsfwRulesFilter(
+                cachedNsfwClassification,
+                nsfwConfidenceThresold,
+              );
+            }
+
+            const isSensitiveContent = isNsfw || contentWarningExist ||
+              nsfwHashtagExist;
+            switch (filterContentMode) {
+              case "sfw":
+                if (!shouldRelay) break;
+                // Accept as long as it is not nsfw or it has not content warning or it has not nswf hashtag
+                shouldRelay = !isSensitiveContent;
+                if (!shouldRelay) because = "Non-NSFW content only filtered";
+                break;
+              case "partialsfw":
+                if (!shouldRelay) break;
+                // Accept as long as it is not nsfw or it has content warning or it has nsfw hashtag
+                shouldRelay = false;
+                if (contentWarningExist || nsfwHashtagExist) {
+                  shouldRelay = true;
+                }
+                else if (!isNsfw) {
+                  shouldRelay = true;
+                }
+                if (!shouldRelay) because = "Partial NSFW content only filtered";
+                break;
+              case "nsfw":
+                if (!shouldRelay) break;
+                shouldRelay = isSensitiveContent;
+                if (!shouldRelay) because = "NSFW content only filtered";
+                break;
+              default:
+                if (!shouldRelay) break;
+                shouldRelay = true;
+                because = "";
+                break;
+            }
+
+            // console.log("isSensitiveContent", isSensitiveContent);
+
+            let cachedLanguageClassification: any;
+            if (languageClassificationCache.has(eventId)) {
+              cachedLanguageClassification = languageClassificationCache.get(eventId) ?? [];
+            }
+            else {
+              // TODO checkLanguageClassificationWithAttempt is function that try to check language classification with several attempts
+              // However, this function is not fully tested and there are bugs with any notes event before EOSE, thus setting the default to empty arrray.
+              // Further analysis needed before using this function.
+              const checkLanguageClassificationWithAttempt = async (eventId: any, numAttempt: number = 2) => {
+                let counter = 0;
+                let result = undefined;
+
+                while (counter < numAttempt) {
+                  console.info("Checking Language for ", eventId, ", waiting for ", (counter + 1) * 500, Date.now());
+                  // Force async sleep await for certain times
+                  await new Promise(r => setTimeout(r, (counter + 1) * 500));
+                  console.info("Checking Language for ", eventId, ", after waiting for ", (counter + 1) * 500, Date.now());
+                  if (languageClassificationCache.has(eventId)) {
+                    result = languageClassificationCache.get(eventId);
+                    console.info("Found Language for ", eventId, result);
+                    break;
+                  }
+                  counter++;
+                }
+                return result;
+              };
+              // cachedLanguageClassification = await checkLanguageClassificationWithAttempt(eventId);
+              cachedLanguageClassification = cachedLanguageClassification ?? [];
+            }
+
+            if (filterLanguageMode.includes("all")) {
+              // do nothing since shouldRelay default value is true
+            }
+            else {
+              // filter based on language
+              const languageRulesFilter = function (
+                classifications: any,
+                filterLanguageMode: string[],
+                languageConfidenceThresold: number = 15,
+              ): boolean {
+                let result = false;
+                for (const languageClassification of classifications) {
+                  const hasProbablyTargetLanguage = filterLanguageMode.includes(languageClassification.language);
+                  const highConfidence = parseFloat(languageClassification.confidence) >= languageConfidenceThresold;
+                  // english doesn't use confidence thresold check
+                  if (hasProbablyTargetLanguage && languageClassification.language === 'en') {
+                    result = true;
+                    break;
+                  }
+                  // other language use confidence thresold check
+                  else if (hasProbablyTargetLanguage && highConfidence) {
+                    result = true;
+                    break;
+                  }
+                  // Debugging language check
+                  // if (hasProbablyTargetLanguage && !highConfidence) {
+                  //   console.info("low confidence = ", event[2].content, JSON.stringify(cachedLanguageClassification));
+                  // }
+                }
+                return result;
+              };
+
+              let hasTargetLanguage = false;
+              hasTargetLanguage = languageRulesFilter(cachedLanguageClassification, filterLanguageMode, languageConfidenceThresold);
+
+              if (!hasTargetLanguage && shouldRelay) {
+                shouldRelay = false;
+                because = "Does not have target language: " + filterLanguageMode.join(", ");
+              }
+            }
+
+            let activityPubUser = isActivityPubUser(event[2].tags ?? []);
+
+            // console.log("activityPubUser", activityPubUser);
+            switch (filterUserMode) {
+              case "nostr":
+                if (!shouldRelay) break;
+                shouldRelay = !activityPubUser;
+                if (!shouldRelay) because = "Nostr native user only filtered";
+                break;
+              case "activitypub":
+                if (!shouldRelay) break;
+                shouldRelay = activityPubUser;
+                if (!shouldRelay) because = "activitypub user only filtered";
+                break;
+              default:
+                if (!shouldRelay) break;
+                shouldRelay = true;
+                because = "";
+                break;
             }
           } else if (event[0] === "INVALID") {
             shouldRelay = false;
