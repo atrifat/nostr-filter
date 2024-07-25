@@ -32,7 +32,7 @@ import {
   hasNsfwHashtag,
   isActivityPubUser,
 } from "./nostr-util";
-import { hasSubstring } from "./util";
+import { hasSubstring, sleepPromise } from "./util";
 
 dotenv.config();
 const NODE_ENV = process.env.NODE_ENV || "production";
@@ -1383,6 +1383,33 @@ async function listen(): Promise<void> {
 
               const hasTargetSentiment = sentimentRulesFilter(cachedSentimentClassificationCache, filterSentimentMode, sentimentConfidenceThresold);
 
+              // Set background check because cachedSentimentClassificationCache is empty for now
+              if (!cachedSentimentClassificationCache) {
+                let sentimentEventCheckProcess = setTimeout(async (shouldRelay: boolean) => {
+                  let hasTargetSentiment = false;
+                  let cachedSentimentClassificationCache: any = sentimentClassificationCache.get(eventId);
+                  let waitCounter = 0;
+                  const delayTime = 5 * 1000;
+                  while (true) {
+                    // Counter to control process state. Maximum waiting time is waitConter * delayTime
+                    if (waitCounter > 30) break;
+                    if (!cachedSentimentClassificationCache) {
+                      await sleepPromise(delayTime);
+                      cachedSentimentClassificationCache = sentimentClassificationCache.get(eventId);
+                      waitCounter++;
+                      continue;
+                    }
+                    else {
+                      hasTargetSentiment = sentimentRulesFilter(cachedSentimentClassificationCache, filterSentimentMode, sentimentConfidenceThresold);
+                      break;
+                    }
+                  }
+
+                  // Send match event to subscriber
+                  if (hasTargetSentiment && shouldRelay) downstreamSocket.send(message);
+                }, 1000 * 1, shouldRelay);
+              }
+
               if (!hasTargetSentiment && shouldRelay) {
                 shouldRelay = false;
                 because = "Does not have target sentiment: " + filterSentimentMode.join(", ");
@@ -1420,6 +1447,33 @@ async function listen(): Promise<void> {
               };
 
               const hasTargetTopic = topicRulesFilter(cachedTopicClassificationCache, filterTopicMode, topicConfidenceThresold);
+
+              // Set background check because cachedTopicClassificationCache is empty for now
+              if (!cachedTopicClassificationCache) {
+                let topicEventCheckProcess = setTimeout(async (shouldRelay: boolean) => {
+                  let hasTargetTopic = false;
+                  let cachedTopicClassificationCache: any = topicClassificationCache.get(eventId);
+                  let waitCounter = 0;
+                  const delayTime = 5 * 1000;
+                  while (true) {
+                    // Counter to control process state. Maximum waiting time is waitConter * delayTime
+                    if (waitCounter > 30) break;
+                    if (!cachedTopicClassificationCache) {
+                      await sleepPromise(delayTime);
+                      cachedTopicClassificationCache = topicClassificationCache.get(eventId);
+                      waitCounter++;
+                      continue;
+                    }
+                    else {
+                      hasTargetTopic = topicRulesFilter(cachedTopicClassificationCache, filterTopicMode, topicConfidenceThresold);
+                      break;
+                    }
+                  }
+
+                  // Send match event to subscriber
+                  if (hasTargetTopic && shouldRelay) downstreamSocket.send(message);
+                }, 1000 * 1, shouldRelay);
+              }
 
               if (!hasTargetTopic && shouldRelay) {
                 shouldRelay = false;
