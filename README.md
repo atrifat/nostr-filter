@@ -9,6 +9,8 @@ Nostr-filter is a user-friendly filtering program designed to improve the manage
 - Language filtering
 - SFW/NSFW Content filtering
 - Hate speech (Toxic Comments) filtering
+- Sentiment filtering
+- Topic filtering
 - and other features listed in [atrifat/nostr-monitoring-tool](https://github.com/atrifat/nostr-monitoring-tool)
 
 [atrifat/nostr-filter](https://github.com/atrifat/nostr-filter) is also main component of [atrifat/nostr-filter-relay](https://github.com/atrifat/nostr-filter-relay) which act as frontend proxy filter relay.

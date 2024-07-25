@@ -32,6 +32,7 @@ import {
   hasNsfwHashtag,
   isActivityPubUser,
 } from "./nostr-util";
+import { hasSubstring } from "./util";
 
 dotenv.config();
 const NODE_ENV = process.env.NODE_ENV || "production";
@@ -56,6 +57,7 @@ const NSFW_CLASSIFICATION_D_TAG = "nostr-nsfw-classification";
 const LANGUAGE_CLASSIFICATION_D_TAG = "nostr-language-classification";
 const HATE_SPEECH_CLASSIFICATION_D_TAG = "nostr-hate-speech-classification";
 const SENTIMENT_CLASSIFICATION_D_TAG = "nostr-sentiment-classification";
+const TOPIC_CLASSIFICATION_D_TAG = "nostr-topic-classification";
 
 const pool = new SimplePool();
 const fetcherNonPool = NostrFetcher.init();
@@ -96,6 +98,14 @@ const sentimentClassificationCache = new LRUCache(
   },
 );
 
+const topicClassificationCache = new LRUCache(
+  {
+    max: 500000,
+    // how long to live in ms (3 days)
+    ttl: 3 * 24 * 60 * 60 * 1000,
+  },
+);
+
 // Default constant variable specific for atrifat/nostr-filter fork. Basic explanations are provided in .env.sample 
 const DEFAULT_FILTER_CONTENT_MODE = process.env.DEFAULT_FILTER_CONTENT_MODE || 'sfw';
 const DEFAULT_FILTER_NSFW_CONFIDENCE = process.env.DEFAULT_FILTER_NSFW_CONFIDENCE || '75';
@@ -106,6 +116,8 @@ const DEFAULT_FILTER_HATE_SPEECH_TOXIC_CONFIDENCE = process.env.DEFAULT_FILTER_H
 const DEFAULT_FILTER_HATE_SPEECH_TOXIC_EVALUATION_MODE = process.env.DEFAULT_FILTER_HATE_SPEECH_TOXIC_EVALUATION_MODE || 'max';
 const DEFAULT_FILTER_SENTIMENT_MODE = process.env.DEFAULT_FILTER_SENTIMENT_MODE || 'all';
 const DEFAULT_FILTER_SENTIMENT_CONFIDENCE = process.env.DEFAULT_FILTER_SENTIMENT_CONFIDENCE || '35';
+const DEFAULT_FILTER_TOPIC_MODE = process.env.DEFAULT_FILTER_TOPIC_MODE || 'all';
+const DEFAULT_FILTER_TOPIC_CONFIDENCE = process.env.DEFAULT_FILTER_TOPIC_CONFIDENCE || '35';
 const DEFAULT_FILTER_USER_MODE = process.env.DEFAULT_FILTER_USER_MODE || 'all';
 
 // 書き込み用の上流リレーとの接続(あらかじめ接続しておいて、WS接続直後のイベントでも取りこぼしを防ぐため)
@@ -302,6 +314,8 @@ const allClassificationDataFetcher = async (sinceHoursAgoToCheck: number = 24, u
       CLASSIFICATION_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, HATE_SPEECH_CLASSIFICATION_D_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
     promiseList.push(classificationDataFetcher(
       CLASSIFICATION_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, SENTIMENT_CLASSIFICATION_D_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
+    promiseList.push(classificationDataFetcher(
+      CLASSIFICATION_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, TOPIC_CLASSIFICATION_D_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
 
     const joinResultRaw = await Promise.allSettled(promiseList);
 
@@ -346,6 +360,10 @@ async function fetchClassificationDataHistory(
         if (sentimentClassificationCache.has(eventId)) break;
         sentimentClassificationCache.set(eventId, JSON.parse(classification.content));
         break;
+      case TOPIC_CLASSIFICATION_D_TAG:
+        if (topicClassificationCache.has(eventId)) break;
+        topicClassificationCache.set(eventId, JSON.parse(classification.content));
+        break;
       default:
         break;
     }
@@ -363,7 +381,7 @@ async function subscribeClassificationDataHistory() {
       {
         kinds: [CLASSIFICATION_EVENT_KIND],
         "authors": [NOSTR_MONITORING_BOT_PUBLIC_KEY],
-        "#d": [NSFW_CLASSIFICATION_D_TAG, LANGUAGE_CLASSIFICATION_D_TAG, HATE_SPEECH_CLASSIFICATION_D_TAG, SENTIMENT_CLASSIFICATION_D_TAG],
+        "#d": [NSFW_CLASSIFICATION_D_TAG, LANGUAGE_CLASSIFICATION_D_TAG, HATE_SPEECH_CLASSIFICATION_D_TAG, SENTIMENT_CLASSIFICATION_D_TAG, TOPIC_CLASSIFICATION_D_TAG],
       },
     ],
     {
@@ -405,6 +423,10 @@ async function subscribeClassificationDataHistory() {
           if (sentimentClassificationCache.has(eventId)) break;
           sentimentClassificationCache.set(eventId, classificationData);
           break;
+        case TOPIC_CLASSIFICATION_D_TAG:
+          if (topicClassificationCache.has(eventId)) break;
+          topicClassificationCache.set(eventId, classificationData);
+          break;
         default:
           break;
       }
@@ -427,7 +449,8 @@ async function listen(): Promise<void> {
   console.info("languageClassificationCache.size", languageClassificationCache.size);
   console.info("hateSpeechClassificationCache.size", hateSpeechClassificationCache.size);
   console.info("sentimentClassificationCache.size", sentimentClassificationCache.size);
-  console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size);
+  console.info("topicClassificationCache.size", topicClassificationCache.size);
+  console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size + topicClassificationCache.size);
 
   // Fetch longer time range data in the background (maximum for 3 days)
   (async () => {
@@ -437,21 +460,24 @@ async function listen(): Promise<void> {
     console.info("languageClassificationCache.size", languageClassificationCache.size);
     console.info("hateSpeechClassificationCache.size", hateSpeechClassificationCache.size);
     console.info("sentimentClassificationCache.size", sentimentClassificationCache.size);
-    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size);
+    console.info("topicClassificationCache.size", topicClassificationCache.size);
+    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size + topicClassificationCache.size);
     await fetchClassificationDataHistory(sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck);
     console.info("ClassificationCache after fetching", sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck);
     console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
     console.info("languageClassificationCache.size", languageClassificationCache.size);
     console.info("hateSpeechClassificationCache.size", hateSpeechClassificationCache.size);
     console.info("sentimentClassificationCache.size", sentimentClassificationCache.size);
-    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size);
+    console.info("topicClassificationCache.size", topicClassificationCache.size);
+    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size + topicClassificationCache.size);
     await fetchClassificationDataHistory(sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2);
     console.info("ClassificationCache after fetching", sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2);
     console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
     console.info("languageClassificationCache.size", languageClassificationCache.size);
     console.info("hateSpeechClassificationCache.size", hateSpeechClassificationCache.size);
     console.info("sentimentClassificationCache.size", sentimentClassificationCache.size);
-    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size);
+    console.info("topicClassificationCache.size", topicClassificationCache.size);
+    console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size + topicClassificationCache.size);
   })();
 
   const fetchEndTime = performance.now();
@@ -1127,6 +1153,17 @@ async function listen(): Promise<void> {
               ? 35 / 100
               : sentimentConfidenceThresold / 100;
 
+            // Filter topic configurations
+            let filterTopicModeString = searchParams.get("topic") ?? DEFAULT_FILTER_TOPIC_MODE;
+            let filterTopicMode = filterTopicModeString.split(",").map(topic => topic.trim().toLowerCase());
+            let topicConfidenceThresold = parseInt(
+              searchParams.get("topic_confidence") ?? DEFAULT_FILTER_TOPIC_CONFIDENCE,
+            );
+            topicConfidenceThresold = Number.isNaN(topicConfidenceThresold) ||
+              topicConfidenceThresold < 0 || topicConfidenceThresold > 100
+              ? 35 / 100
+              : topicConfidenceThresold / 100;
+
             let filterUserMode = searchParams.get("user") ?? DEFAULT_FILTER_USER_MODE;
             let validFilterUserMode = ["all", "nostr", "activitypub"];
             const contentWarningExist = hasContentWarning(event[2].tags ?? []);
@@ -1349,6 +1386,44 @@ async function listen(): Promise<void> {
               if (!hasTargetSentiment && shouldRelay) {
                 shouldRelay = false;
                 because = "Does not have target sentiment: " + filterSentimentMode.join(", ");
+              }
+            }
+
+            // Check topic classification results
+            let cachedTopicClassificationCache: any = topicClassificationCache.get(eventId);
+            if (!filterTopicMode.includes("all")) {
+              // filter based on topic
+              const topicRulesFilter = function (
+                classifications: any[],
+                filterTopicMode: string[],
+                topicConfidenceThresold: number = 35,
+              ): boolean {
+                let result = false;
+                if (!classifications) return false;
+
+                for (const classification of classifications) {
+                  let hasProbablyTargetTopic = false;
+                  for (const topicFilter of filterTopicMode) {
+                    if (hasSubstring(classification.label, [topicFilter])) {
+                      hasProbablyTargetTopic = true;
+                      break;
+                    }
+                  }
+
+                  const highConfidence = parseFloat(classification.score ?? 0.0) >= topicConfidenceThresold;
+                  if (hasProbablyTargetTopic && highConfidence) {
+                    result = true;
+                    break;
+                  }
+                }
+                return result;
+              };
+
+              const hasTargetTopic = topicRulesFilter(cachedTopicClassificationCache, filterTopicMode, topicConfidenceThresold);
+
+              if (!hasTargetTopic && shouldRelay) {
+                shouldRelay = false;
+                because = "Does not have target topic: " + filterTopicMode.join(", ");
               }
             }
 
