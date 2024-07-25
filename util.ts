@@ -10,3 +10,7 @@ export const hasSubstring = (text: string, wordCandidates: string[] = []): boole
     }
     return _hasSubstring;
 }
+
+export async function sleepPromise(duration: number) {
+    return new Promise(r => setTimeout(r, duration));
+}
