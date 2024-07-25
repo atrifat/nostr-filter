@@ -1370,13 +1370,18 @@ async function listen(): Promise<void> {
                 sentimentConfidenceThresold: number = 35,
               ): boolean {
                 let result = false;
+                let sentimentLabel = "";
+                let sentimentMaxScore = 0.0;
                 for (const label in classification) {
-                  const hasProbablyTargetSentiment = filterSentimentMode.includes(label);
-                  const highConfidence = parseFloat(classification[label] ?? 0.0) >= sentimentConfidenceThresold;
-                  if (hasProbablyTargetSentiment && highConfidence) {
-                    result = true;
-                    break;
+                  if (classification[label] > sentimentMaxScore) {
+                    sentimentMaxScore = parseFloat(classification[label] ?? 0.0);
+                    sentimentLabel = label;
                   }
+                }
+                const hasProbablyTargetSentiment = filterSentimentMode.includes(sentimentLabel);
+                const highConfidence = sentimentMaxScore >= sentimentConfidenceThresold;
+                if (hasProbablyTargetSentiment && highConfidence) {
+                  result = true;
                 }
                 return result;
               };
