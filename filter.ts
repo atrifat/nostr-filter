@@ -153,6 +153,8 @@ const whitelistedPubkeys: string[] =
 const filterProxyEvents = process.env.FILTER_PROXY_EVENTS === "true";
 // Forward request headers to upstream
 const enableForwardReqHeaders = process.env.ENABLE_FORWARD_REQ_HEADERS === "true";
+// Set maximum websocket server payload size (maximum allowed message size) in bytes
+const maxWebsocketPayloadSize: number = parseInt(process.env.MAX_WEBSOCKET_PAYLOAD_SIZE ?? "1000000");
 
 // クライアントIPアドレスのCIDRフィルタ
 const cidrRanges: string[] = Object.keys(process.env)
@@ -543,7 +545,7 @@ async function listen(): Promise<void> {
     },
   );
   // WebSocketサーバーの構成
-  const wss = new WebSocket.Server({ server });
+  const wss = new WebSocket.Server({ server: server, maxPayload: maxWebsocketPayloadSize });
   wss.on(
     "connection",
     async (downstreamSocket: WebSocket, req: http.IncomingMessage) => {
