@@ -20,6 +20,7 @@
     "nostr-fetch": "^0.15.0",
     "nostr-tools": "^1.16.0",
     "p-limit": "^3.1.0",
+    "rate-limiter-flexible": "^5.0.3",
     "typescript": "^5.0.2",
     "uuid": "^9.0.0",
     "websocket-polyfill": "^0.0.3",
