@@ -33,6 +33,7 @@ import {
   isActivityPubUser,
 } from "./nostr-util";
 import { hasSubstring, sleepPromise } from "./util";
+import { RateLimiterMemory } from "rate-limiter-flexible"
 
 dotenv.config();
 const NODE_ENV = process.env.NODE_ENV || "production";
@@ -58,6 +59,11 @@ const LANGUAGE_CLASSIFICATION_D_TAG = "nostr-language-classification";
 const HATE_SPEECH_CLASSIFICATION_D_TAG = "nostr-hate-speech-classification";
 const SENTIMENT_CLASSIFICATION_D_TAG = "nostr-sentiment-classification";
 const TOPIC_CLASSIFICATION_D_TAG = "nostr-topic-classification";
+
+const ENABLE_RATE_LIMIT = process.env.ENABLE_RATE_LIMIT === "true";
+const RATE_LIMIT_KEY = process.env.RATE_LIMIT_KEY ?? "IP";
+const MAX_WEBSOCKET_MESSAGE_PER_SECOND = parseInt(process.env.MAX_WEBSOCKET_MESSAGE_PER_SECOND ?? "10");
+const MAX_WEBSOCKET_MESSAGE_PER_MINUTE = parseInt(process.env.MAX_WEBSOCKET_MESSAGE_PER_MINUTE ?? "1000");
 
 const pool = new SimplePool();
 const fetcherNonPool = NostrFetcher.init();
@@ -105,6 +111,18 @@ const topicClassificationCache = new LRUCache(
     ttl: 3 * 24 * 60 * 60 * 1000,
   },
 );
+
+const baseRateLimiterPerSecond = new RateLimiterMemory(
+  {
+    points: MAX_WEBSOCKET_MESSAGE_PER_SECOND, // points
+    duration: 1, // per second
+  });
+
+const baseRateLimiterPerMinute = new RateLimiterMemory(
+  {
+    points: MAX_WEBSOCKET_MESSAGE_PER_MINUTE, // points
+    duration: 60, // per 60 seconds
+  });
 
 // Default constant variable specific for atrifat/nostr-filter fork. Basic explanations are provided in .env.sample 
 const DEFAULT_FILTER_CONTENT_MODE = process.env.DEFAULT_FILTER_CONTENT_MODE || 'sfw';
@@ -707,6 +725,46 @@ async function listen(): Promise<void> {
         let shouldRelay = true;
         let because = "";
         let isMessageEdited = false;
+        let isRateLimited = false;
+        let rateLimitKey = (RATE_LIMIT_KEY === "IP") ? ip : socketId;
+
+        // Apply rate limit check for seconds rule
+        try {
+          await baseRateLimiterPerSecond.consume(rateLimitKey);
+        }
+        catch (rateLimitError: any) {
+          isRateLimited = true;
+          because = "Rate-limited. Try again later.";
+        }
+
+        // Apply rate limit check for minutes rule
+        try {
+          await baseRateLimiterPerMinute.consume(rateLimitKey);
+        }
+        catch (rateLimitError: any) {
+          isRateLimited = true;
+          because = "Rate-limited. Try again later in few minutes.";
+        }
+
+        if (isRateLimited && ENABLE_RATE_LIMIT) {
+          shouldRelay = false;
+          const blockedMessage = JSON.stringify([
+            "CLOSED",
+            `blocked: ${because}`,
+          ]);
+          downstreamSocket.send(blockedMessage);
+
+          console.warn(
+            JSON.stringify({
+              msg: "RATE-LIMITED",
+              ip,
+              port,
+              socketId,
+              because,
+            }),
+          );
+        }
+
         // kind1だけフィルタリングを行う
         if (event[0] === "EVENT") {
           const subscriptionId = event[1].id;
