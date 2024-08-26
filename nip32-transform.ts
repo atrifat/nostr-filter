@@ -17,3 +17,12 @@ export function transformNip32ContentSafetyToLegacyFormat(classificationData: an
 
   return finalClassificationData;
 }
+
+// A workaround while deprecating legacy format. This function will be adjusted when NIP-32 fully implemented properly.
+export function transformNip32LanguageToLegacyFormat(classificationData: any[][]) {
+  let finalClassificationData = [];
+  for (const classification of classificationData) {
+    finalClassificationData.push({ confidence: classification[3], language: classification[1] })
+  }
+  return finalClassificationData;
+}
