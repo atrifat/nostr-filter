@@ -32,8 +32,11 @@ import {
   hasNsfwHashtag,
   isActivityPubUser,
 } from "./nostr-util";
+import {
+  transformNip32ContentSafetyToLegacyFormat,
+} from "./nip32-transform";
 import { hasSubstring, sleepPromise } from "./util";
-import { RateLimiterMemory } from "rate-limiter-flexible"
+import { RateLimiterMemory } from "rate-limiter-flexible";
 
 dotenv.config();
 const NODE_ENV = process.env.NODE_ENV || "production";
@@ -51,13 +54,24 @@ const upstreamHttpUrl: string =
   process.env.UPSTREAM_HTTP_URL ?? "http://localhost:8080"; // 上流のWebSocketサーバのURL
 const upstreamWsUrl: string =
   process.env.UPSTREAM_WS_URL ?? "ws://localhost:8080"; // 上流のWebSocketサーバのURL
+const USE_NIP_32_EVENT_FORMAT = process.env.USE_NIP_32_EVENT_FORMAT ? process.env.USE_NIP_32_EVENT_FORMAT === "true" : false;
 const NOSTR_MONITORING_BOT_PUBLIC_KEY: string =
   process.env.NOSTR_MONITORING_BOT_PUBLIC_KEY ?? "";
+// Deprecated legacy event kind.
 const CLASSIFICATION_EVENT_KIND = 9978;
+const LABELLING_EVENT_KIND = 1985;
+
+// Deprecated tag
 const NSFW_CLASSIFICATION_D_TAG = "nostr-nsfw-classification";
+const CONTENT_SAFETY_NAMESPACE_L_TAG = "app.nfrelay.content-safety";
+
+// Deprecated tag
 const LANGUAGE_CLASSIFICATION_D_TAG = "nostr-language-classification";
+// Deprecated tag
 const HATE_SPEECH_CLASSIFICATION_D_TAG = "nostr-hate-speech-classification";
+// Deprecated tag
 const SENTIMENT_CLASSIFICATION_D_TAG = "nostr-sentiment-classification";
+// Deprecated tag
 const TOPIC_CLASSIFICATION_D_TAG = "nostr-topic-classification";
 
 const ENABLE_RATE_LIMIT = process.env.ENABLE_RATE_LIMIT === "true";
@@ -276,6 +290,7 @@ async function regularEventFetcherWarmup() {
   });
 }
 
+// Deprecated. Consider to use NIP-32 in future implementation.
 const classificationDataFetcher = async (kind: number, monitoringBotPubkey: string, dtag: string, sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0): Promise<NostrEventExt[]> => {
   return new Promise<NostrEventExt[]>(async (resolve, reject) => {
     const stride = sinceHoursAgoToCheck > 24 ? 2 : 1;
@@ -321,6 +336,51 @@ const classificationDataFetcher = async (kind: number, monitoringBotPubkey: stri
   });
 };
 
+const classificationDataNip32Fetcher = async (kind: number, monitoringBotPubkey: string, namespace: string, sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0): Promise<NostrEventExt[]> => {
+  return new Promise<NostrEventExt[]>(async (resolve, reject) => {
+    const stride = sinceHoursAgoToCheck > 24 ? 2 : 1;
+    const promiseList = [];
+    for (let i = 0; i + untilHoursAgoToCheck < sinceHoursAgoToCheck; i += stride) {
+      const since = (i + stride + untilHoursAgoToCheck) > sinceHoursAgoToCheck ? sinceHoursAgoToCheck : (i + stride + untilHoursAgoToCheck);
+      const until = i + untilHoursAgoToCheck;
+      console.debug("Fetching", namespace, "since", since, "hours ago", "until", until, "hours ago");
+      promiseList.push(relayRequestLimiter(() => {
+        return fetcherNonPool.fetchAllEvents(
+          [upstreamWsUrl],
+          /* filter */
+          {
+            kinds: [kind],
+            "authors": [monitoringBotPubkey],
+            "#L": [namespace],
+          },
+          /* time range filter */
+          {
+            since: nHoursAgoInUnixTime(since),
+            until: nHoursAgoInUnixTime(until),
+          },
+          /* fetch options (optional) */
+          { sort: false, skipVerification: true },
+        );
+      }));
+    }
+    const joinResultRaw = await Promise.allSettled(promiseList);
+    const joinResult: NostrEventExt[] = [];
+
+    for (const tmpResult of joinResultRaw) {
+      if (tmpResult.status === 'rejected') {
+        console.error(tmpResult.reason.message);
+        continue;
+      }
+      tmpResult.value.forEach(item => {
+        joinResult.push(item);
+      });
+    }
+
+    resolve(joinResult);
+  });
+};
+
+// Deprecated. Consider to use NIP-32 in future implementation.
 const allClassificationDataFetcher = async (sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0): Promise<NostrEventExt[]> => {
   return new Promise(async (resolve, reject) => {
     const joinResult: NostrEventExt[] = [];
@@ -350,6 +410,28 @@ const allClassificationDataFetcher = async (sinceHoursAgoToCheck: number = 24, u
   });
 };
 
+const allClassificationDataNip32Fetcher = async (sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0): Promise<NostrEventExt[]> => {
+  return new Promise(async (resolve, reject) => {
+    const joinResult: NostrEventExt[] = [];
+
+    const promiseList = []
+    promiseList.push(classificationDataNip32Fetcher(
+      LABELLING_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, CONTENT_SAFETY_NAMESPACE_L_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
+
+    const joinResultRaw = await Promise.allSettled(promiseList);
+
+    for (const tmpResult of joinResultRaw) {
+      if (tmpResult.status === 'rejected') continue;
+      tmpResult.value.forEach(item => {
+        joinResult.push(item);
+      });
+    }
+
+    resolve(joinResult);
+  });
+};
+
+// Deprecated. Consider to use NIP-32 in future implementation.
 async function fetchClassificationDataHistory(
   sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0
 ) {
@@ -394,6 +476,45 @@ async function fetchClassificationDataHistory(
   console.info("classificationData.length", classificationData.length);
 }
 
+async function fetchClassificationDataNip32History(
+  sinceHoursAgoToCheck: number = 24, untilHoursAgoToCheck: number = 0
+) {
+  const classificationData = await allClassificationDataNip32Fetcher(sinceHoursAgoToCheck, untilHoursAgoToCheck);
+
+  for (const classification of classificationData) {
+    const eventTags = classification.tags.filter((tag) => tag[0] === "e");
+    const LTags = classification.tags.filter((tag) => tag[0] === "L" && tag[1].includes("app.nfrelay"));
+    if (eventTags.length === 0) continue;
+    if (LTags.length === 0) continue;
+    const eventId = eventTags[0][1];
+    const LTag = LTags[0][1];
+
+    let classificationDataRaw: any[][] = classification.tags
+      .filter((tag) => tag[0] === "label_score" && tag[2].includes("app.nfrelay"))
+      .map(tag => [tag[0], tag[1], tag[2], parseFloat(tag[3])]);
+
+    const labelSchema = classification.tags.filter((tag) => tag[0] === "label_schema" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
+    const labelSchemaOriginal = classification.tags.filter((tag) => tag[0] === "label_schema_original" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
+    let classificationData;
+
+    switch (LTag) {
+      case CONTENT_SAFETY_NAMESPACE_L_TAG:
+        if (nsfwClassificationCache.has(eventId)) break;
+        classificationData = classificationDataRaw.filter((tag) => labelSchemaOriginal.includes(tag[1]));
+        classificationData = transformNip32ContentSafetyToLegacyFormat(classificationData);
+        nsfwClassificationCache.set(eventId, classificationData);
+        break;
+      default:
+        break;
+    }
+  }
+
+  console.debug(classificationData[0]);
+  console.debug(classificationData[classificationData.length - 1]);
+  console.info("classificationData.length", classificationData.length);
+}
+
+// Deprecated. Consider to use NIP-32 in future implementation.
 async function subscribeClassificationDataHistory() {
   let subClassificationData = pool.sub(
     [upstreamWsUrl],
@@ -456,14 +577,84 @@ async function subscribeClassificationDataHistory() {
   });
 }
 
+async function subscribeClassificationDataNip32History() {
+  let subIdForClassificationDataHistory = uuidv4().substring(0, 4);
+  let LTag = [CONTENT_SAFETY_NAMESPACE_L_TAG];
+  let filterClassificationDataHistory: any = {
+    kinds: [LABELLING_EVENT_KIND],
+    authors: [NOSTR_MONITORING_BOT_PUBLIC_KEY]
+  };
+
+  filterClassificationDataHistory["#L"] = LTag;
+
+  console.info(filterClassificationDataHistory);
+
+  let subClassificationData = pool.sub(
+    [upstreamWsUrl],
+    [
+      filterClassificationDataHistory
+    ],
+    {
+      id: subIdForClassificationDataHistory,
+    },
+  );
+  let subClassificationDataEose = false;
+
+  subClassificationData.on("eose", () => {
+    // sub.unsub()
+    subClassificationDataEose = true;
+  });
+  subClassificationData.on("event", (event) => {
+    // Only process after eose event
+    // if (!subClassificationDataEose) return;
+    const eventTags = event.tags.filter((tag) => tag[0] === "e");
+    const pTags = event.tags.filter((tag) => tag[0] === "p");
+    const LTags = event.tags.filter((tag) => tag[0] === "L" && tag[1].includes("app.nfrelay"));
+    if (eventTags.length === 0) return;
+    if (LTags.length === 0) return;
+    const eventId = eventTags.at(0)?.at(1) ?? "";
+    const taggedAuthor = pTags.at(0)?.at(1) ?? "";
+    const LTag = LTags[0][1];
+
+    try {
+      let classificationDataRaw: any[][] = event.tags
+        .filter((tag) => tag[0] === "label_score" && tag[2].includes("app.nfrelay"))
+        .map(tag => [tag[0], tag[1], tag[2], parseFloat(tag[3])]);
+
+      const labelSchema = event.tags.filter((tag) => tag[0] === "label_schema" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
+      const labelSchemaOriginal = event.tags.filter((tag) => tag[0] === "label_schema_original" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
+      let classificationData;
+
+      switch (LTag) {
+        case CONTENT_SAFETY_NAMESPACE_L_TAG:
+          if (nsfwClassificationCache.has(eventId)) break;
+          classificationData = classificationDataRaw.filter((tag) => labelSchemaOriginal.includes(tag[1]));
+          classificationData = transformNip32ContentSafetyToLegacyFormat(classificationData);
+          nsfwClassificationCache.set(eventId, classificationData);
+          break;
+        default:
+          break;
+      }
+
+    } catch (error) {
+      console.error(error);
+    }
+  });
+}
+
 async function listen(): Promise<void> {
-  subscribeClassificationDataHistory();
+  if (!USE_NIP_32_EVENT_FORMAT) {
+    subscribeClassificationDataHistory();
+  }
+  else {
+    subscribeClassificationDataNip32History();
+  }
 
   const sinceHoursAgoToCheck = 24 * 1;
   const untilHoursAgoToCheck = 4;
   const fetchStartTime = performance.now();
   // Fetch short time range data as initial data (fast response)
-  await fetchClassificationDataHistory(untilHoursAgoToCheck, 0);
+  (!USE_NIP_32_EVENT_FORMAT) ? await fetchClassificationDataHistory(untilHoursAgoToCheck, 0) : await fetchClassificationDataNip32History(untilHoursAgoToCheck, 0);
   console.info("ClassificationCache after initial data");
   console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
   console.info("languageClassificationCache.size", languageClassificationCache.size);
@@ -474,7 +665,7 @@ async function listen(): Promise<void> {
 
   // Fetch longer time range data in the background (maximum for 3 days)
   (async () => {
-    await fetchClassificationDataHistory(sinceHoursAgoToCheck, untilHoursAgoToCheck);
+    (!USE_NIP_32_EVENT_FORMAT) ? await fetchClassificationDataHistory(sinceHoursAgoToCheck, untilHoursAgoToCheck) : await fetchClassificationDataNip32History(sinceHoursAgoToCheck, untilHoursAgoToCheck);
     console.info("ClassificationCache after fetching", sinceHoursAgoToCheck, untilHoursAgoToCheck);
     console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
     console.info("languageClassificationCache.size", languageClassificationCache.size);
@@ -482,7 +673,7 @@ async function listen(): Promise<void> {
     console.info("sentimentClassificationCache.size", sentimentClassificationCache.size);
     console.info("topicClassificationCache.size", topicClassificationCache.size);
     console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size + topicClassificationCache.size);
-    await fetchClassificationDataHistory(sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck);
+    (!USE_NIP_32_EVENT_FORMAT) ? await fetchClassificationDataHistory(sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck) : await fetchClassificationDataNip32History(sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck);
     console.info("ClassificationCache after fetching", sinceHoursAgoToCheck * 2, sinceHoursAgoToCheck);
     console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
     console.info("languageClassificationCache.size", languageClassificationCache.size);
@@ -490,7 +681,7 @@ async function listen(): Promise<void> {
     console.info("sentimentClassificationCache.size", sentimentClassificationCache.size);
     console.info("topicClassificationCache.size", topicClassificationCache.size);
     console.info("ClassificationCache.size", nsfwClassificationCache.size + languageClassificationCache.size + hateSpeechClassificationCache.size + sentimentClassificationCache.size + topicClassificationCache.size);
-    await fetchClassificationDataHistory(sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2);
+    (!USE_NIP_32_EVENT_FORMAT) ? await fetchClassificationDataHistory(sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2) : await fetchClassificationDataNip32History(sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2);
     console.info("ClassificationCache after fetching", sinceHoursAgoToCheck * 3, sinceHoursAgoToCheck * 2);
     console.info("nsfwClassificationCache.size", nsfwClassificationCache.size);
     console.info("languageClassificationCache.size", languageClassificationCache.size);
