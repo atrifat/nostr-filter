@@ -44,3 +44,12 @@ export function transformNip32SentimentToLegacyFormat(classificationData: any[][
   }
   return finalClassificationData;
 }
+
+// A workaround while deprecating legacy format. This function will be adjusted when NIP-32 fully implemented properly.
+export function transformNip32TopicToLegacyFormat(classificationData: any[][]) {
+  let finalClassificationData = [];
+  for (const classification of classificationData) {
+    finalClassificationData.push({ score: classification[3], label: classification[1] })
+  }
+  return finalClassificationData;
+}
