@@ -35,3 +35,12 @@ export function transformNip32ToxicityToLegacyFormat(classificationData: any[][]
   }
   return finalClassificationData;
 }
+
+// A workaround while deprecating legacy format. This function will be adjusted when NIP-32 fully implemented properly.
+export function transformNip32SentimentToLegacyFormat(classificationData: any[][]) {
+  let finalClassificationData: any = {};
+  for (const classification of classificationData) {
+    finalClassificationData[classification[1]] = classification[3];
+  }
+  return finalClassificationData;
+}

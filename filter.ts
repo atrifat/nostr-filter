@@ -36,6 +36,7 @@ import {
   transformNip32ContentSafetyToLegacyFormat,
   transformNip32LanguageToLegacyFormat,
   transformNip32ToxicityToLegacyFormat,
+  transformNip32SentimentToLegacyFormat,
 } from "./nip32-transform";
 import { hasSubstring, sleepPromise } from "./util";
 import { RateLimiterMemory } from "rate-limiter-flexible";
@@ -77,6 +78,8 @@ const TOXICITY_NAMESPACE_L_TAG = "app.nfrelay.toxicity";
 
 // Deprecated tag
 const SENTIMENT_CLASSIFICATION_D_TAG = "nostr-sentiment-classification";
+const SENTIMENT_NAMESPACE_L_TAG = "app.nfrelay.sentiment";
+
 // Deprecated tag
 const TOPIC_CLASSIFICATION_D_TAG = "nostr-topic-classification";
 
@@ -427,6 +430,8 @@ const allClassificationDataNip32Fetcher = async (sinceHoursAgoToCheck: number = 
       LABELLING_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, LANGUAGE_NAMESPACE_L_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
     promiseList.push(classificationDataNip32Fetcher(
       LABELLING_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, TOXICITY_NAMESPACE_L_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
+    promiseList.push(classificationDataNip32Fetcher(
+      LABELLING_EVENT_KIND, NOSTR_MONITORING_BOT_PUBLIC_KEY, SENTIMENT_NAMESPACE_L_TAG, sinceHoursAgoToCheck, untilHoursAgoToCheck));
 
     const joinResultRaw = await Promise.allSettled(promiseList);
 
@@ -526,6 +531,12 @@ async function fetchClassificationDataNip32History(
         classificationData = transformNip32ToxicityToLegacyFormat(classificationData);
         hateSpeechClassificationCache.set(eventId, classificationData);
         break;
+      case SENTIMENT_NAMESPACE_L_TAG:
+        if (sentimentClassificationCache.has(eventId)) break;
+        classificationData = classificationDataRaw.filter((tag) => labelSchemaOriginal.includes(tag[1]));
+        classificationData = transformNip32SentimentToLegacyFormat(classificationData);
+        sentimentClassificationCache.set(eventId, classificationData);
+        break;
       default:
         break;
     }
@@ -601,7 +612,7 @@ async function subscribeClassificationDataHistory() {
 
 async function subscribeClassificationDataNip32History() {
   let subIdForClassificationDataHistory = uuidv4().substring(0, 4);
-  let LTag = [CONTENT_SAFETY_NAMESPACE_L_TAG, LANGUAGE_NAMESPACE_L_TAG, TOXICITY_NAMESPACE_L_TAG];
+  let LTag = [CONTENT_SAFETY_NAMESPACE_L_TAG, LANGUAGE_NAMESPACE_L_TAG, TOXICITY_NAMESPACE_L_TAG, SENTIMENT_NAMESPACE_L_TAG];
   let filterClassificationDataHistory: any = {
     kinds: [LABELLING_EVENT_KIND],
     authors: [NOSTR_MONITORING_BOT_PUBLIC_KEY]
@@ -665,6 +676,12 @@ async function subscribeClassificationDataNip32History() {
           classificationData = classificationDataRaw.filter((tag) => labelSchemaOriginal.includes(tag[1]));
           classificationData = transformNip32ToxicityToLegacyFormat(classificationData);
           hateSpeechClassificationCache.set(eventId, classificationData);
+          break;
+        case SENTIMENT_NAMESPACE_L_TAG:
+          if (sentimentClassificationCache.has(eventId)) break;
+          classificationData = classificationDataRaw.filter((tag) => labelSchemaOriginal.includes(tag[1]));
+          classificationData = transformNip32SentimentToLegacyFormat(classificationData);
+          sentimentClassificationCache.set(eventId, classificationData);
           break;
         default:
           break;
