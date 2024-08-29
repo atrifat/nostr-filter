@@ -58,7 +58,7 @@ const upstreamHttpUrl: string =
   process.env.UPSTREAM_HTTP_URL ?? "http://localhost:8080"; // 上流のWebSocketサーバのURL
 const upstreamWsUrl: string =
   process.env.UPSTREAM_WS_URL ?? "ws://localhost:8080"; // 上流のWebSocketサーバのURL
-const USE_NIP_32_EVENT_FORMAT = process.env.USE_NIP_32_EVENT_FORMAT ? process.env.USE_NIP_32_EVENT_FORMAT === "true" : false;
+const USE_NIP_32_EVENT_FORMAT = process.env.USE_NIP_32_EVENT_FORMAT ? process.env.USE_NIP_32_EVENT_FORMAT === "true" : true;
 const NOSTR_MONITORING_BOT_PUBLIC_KEY: string =
   process.env.NOSTR_MONITORING_BOT_PUBLIC_KEY ?? "";
 // Deprecated legacy event kind.
