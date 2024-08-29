@@ -560,6 +560,7 @@ async function fetchClassificationDataNip32History(
 
 // Deprecated. Consider to use NIP-32 in future implementation.
 async function subscribeClassificationDataHistory() {
+  let subIdForClassificationDataHistory = uuidv4().substring(0, 4);
   let subClassificationData = pool.sub(
     [upstreamWsUrl],
     [
@@ -570,7 +571,7 @@ async function subscribeClassificationDataHistory() {
       },
     ],
     {
-      id: "subClassification",
+      id: subIdForClassificationDataHistory,
     },
   );
   let subClassificationDataEose = false;
