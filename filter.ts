@@ -85,6 +85,7 @@ const SENTIMENT_NAMESPACE_L_TAG = "app.nfrelay.sentiment";
 const TOPIC_CLASSIFICATION_D_TAG = "nostr-topic-classification";
 const TOPIC_NAMESPACE_L_TAG = "app.nfrelay.topic";
 
+const RELAY_REQUEST_CONCURRENCY_LIMIT = parseInt(process.env.RELAY_REQUEST_CONCURRENCY_LIMIT ?? "10");
 const ENABLE_RATE_LIMIT = process.env.ENABLE_RATE_LIMIT === "true";
 const RATE_LIMIT_KEY = process.env.RATE_LIMIT_KEY ?? "IP";
 const MAX_WEBSOCKET_MESSAGE_PER_SECOND = parseInt(process.env.MAX_WEBSOCKET_MESSAGE_PER_SECOND ?? "10");
@@ -93,7 +94,7 @@ const MAX_WEBSOCKET_MESSAGE_PER_MINUTE = parseInt(process.env.MAX_WEBSOCKET_MESS
 const pool = new SimplePool();
 const fetcherNonPool = NostrFetcher.init();
 const fetcher = NostrFetcher.withCustomPool(simplePoolAdapter(pool));
-const relayRequestLimiter = pLimit(10);
+const relayRequestLimiter = pLimit(RELAY_REQUEST_CONCURRENCY_LIMIT);
 const nHoursAgoInUnixTime = (hrs: number): number =>
   Math.floor((Date.now() - hrs * 60 * 60 * 1000) / 1000);
 
