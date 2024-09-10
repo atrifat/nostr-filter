@@ -511,7 +511,9 @@ async function fetchClassificationDataNip32History(
 
     let classificationDataRaw: any[][] = classification.tags
       .filter((tag) => tag[0] === "label_score" && tag[2].includes("app.nfrelay"))
-      .map(tag => [tag[0], tag[1], tag[2], parseFloat(tag[3])]);
+      .map(tag => {
+        return tag.map((value, index) => (index === 3 ? parseFloat(value) : value));
+      });
 
     const labelSchema = classification.tags.filter((tag) => tag[0] === "label_schema" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
     const labelSchemaOriginal = classification.tags.filter((tag) => tag[0] === "label_schema_original" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
@@ -664,7 +666,9 @@ async function subscribeClassificationDataNip32History() {
     try {
       let classificationDataRaw: any[][] = event.tags
         .filter((tag) => tag[0] === "label_score" && tag[2].includes("app.nfrelay"))
-        .map(tag => [tag[0], tag[1], tag[2], parseFloat(tag[3])]);
+        .map(tag => {
+          return tag.map((value, index) => (index === 3 ? parseFloat(value) : value));
+        });
 
       const labelSchema = event.tags.filter((tag) => tag[0] === "label_schema" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
       const labelSchemaOriginal = event.tags.filter((tag) => tag[0] === "label_schema_original" && tag[1].includes("app.nfrelay")).at(0)?.slice(2) ?? [];
